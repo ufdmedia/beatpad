@@ -111,21 +111,34 @@ func openMotor() -> CFTypeRef {
     noTrackpad(true)
 }
 
+var motorPolicy = PolicySnapshot()
 var motor: CFTypeRef?
 var motorPointer: UnsafeMutableRawPointer?
 
 /// Plays tones (Hz, relative strength) together for `ms` at overall `level` (0…1). Strengths are scaled to
 /// add up to 1: past that is louder, but the driver starts stalling on long runs.
-func play(_ tones: [(hz: Double, amp: Double)], ms: Double, level: Float) {
-    guard let motorPointer, !tones.isEmpty else { return }
-    let sum = max(tones.reduce(0) { $0 + $1.amp }, 0.0001)
-    let shape: [String: Any] = [
-        "BaseWaveform": ["Type": "Gaussian", "Amplitude": 0.0, "DurationMS": ms],
-        "Tones": tones.map { ["Type": "Sine", "Amplitude": $0.amp / sum, "DurationMS": ms, "DelayMS": 0.0, "FrequencykHz": $0.hz / 1000] },
-    ]
-    guard let act = actuationCreate!(shape as CFDictionary, 0) else { return }
-    _ = actuationPlay!(act, motorPointer, 0, min(1, max(0, level)), 0)
-    Unmanaged<AnyObject>.fromOpaque(act).release()
+func play(_ tones: [(hz: Double, amp: Double)], ms: Double, level: Float,
+          policy: PolicySnapshot? = nil, actuationHook: (() -> Void)? = nil) {
+    let snapshot = policy ?? motorPolicy
+    guard !tones.isEmpty else { return }
+    var act: UnsafeMutableRawPointer?
+    let actuate: () -> Void
+    if let actuationHook {
+        actuate = actuationHook
+    } else {
+        guard let motorPointer else { return }
+        let sum = max(tones.reduce(0) { $0 + $1.amp }, 0.0001)
+        let shape: [String: Any] = [
+            "BaseWaveform": ["Type": "Gaussian", "Amplitude": 0.0, "DurationMS": ms],
+            "Tones": tones.map { ["Type": "Sine", "Amplitude": $0.amp / sum, "DurationMS": ms, "DelayMS": 0.0, "FrequencykHz": $0.hz / 1000] },
+        ]
+        guard let created = actuationCreate!(shape as CFDictionary, 0) else { return }
+        act = created
+        actuate = { _ = actuationPlay!(created, motorPointer, 0, min(1, max(0, level)), 0) }
+    }
+    defer { if let act { Unmanaged<AnyObject>.fromOpaque(act).release() } }
+    // Check after preparing the burst, immediately before submitting it to the actuator.
+    snapshot.submit(actuate)
 }
 
 func voice(_ hit: Hit, master: Double, cutoff: UInt64, canActuate: () -> Bool = { true }) {

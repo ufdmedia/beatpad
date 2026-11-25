@@ -51,6 +51,22 @@ can hear the trackpad's own tones.
 Use the metronome to tune timing. If the thump comes before the click, raise
 `--offset-ms`; positive values make haptics later. Ctrl-C stops playback.
 
+## When the trackpad moves
+
+The built-in trackpad runs only while sound goes to the built-in speakers and the
+lid is confirmed open. Other outputs pause haptics while analysis keeps running;
+switching back resumes automatically. `--any-output` allows headphones and other
+outputs, but the built-in pad still requires a confirmed open lid. An unreadable
+output route (device, transport or data source) or lid state counts as “not allowed”.
+Unreadable volume or mute means volume is not followed. Haptics pause within about
+a quarter of a second of switching output (immediately on most switches via change notifications)
+and within about a second of closing the lid. A burst already in progress finishes,
+taking at most about 40 ms. A stalled output check also pauses built-in haptics.
+
+`--external` selects a Magic Trackpad, which is exempt from the output and lid
+restrictions. Desktop Macs using a Magic Trackpad are also exempt, even without
+`--external`; the exemption follows the trackpad actually opened.
+
 ## Options
 
 | Flag | Meaning |
@@ -80,6 +96,7 @@ Use the metronome to tune timing. If the thump comes before the click, raise
 | `--kick-only` | Drop beat ticks and onset accents. |
 | `--start SEC` | Start partway through a file; default 0. |
 | `--bpm N` | Force file/live tempo or metronome tempo, greater than zero; metronome default 120. |
+| `--any-output` | Allow any audio output; the built-in trackpad still requires an open lid. |
 | `--external` | Use an external Magic Trackpad. |
 | `--` | End option parsing, useful for filenames starting with a dash. |
 
@@ -110,8 +127,8 @@ benchmark splice WAVs locally.
 
 ## Safety and caveats
 
-The private MultitouchSupport API may break with macOS updates. beatpad never
-requests more than amplitude 1.0 from the private actuation API, the same ceiling
+The private MultitouchSupport API may break with macOS updates. beatpad caps
+requested amplitude at 1.0 from the private actuation API, the same ceiling
 nospeaker uses. Every actuation is a short burst: one cycle for thumps and at most
 about 40 ms per melody chunk. Melody drives the motor nearly continuously while
 a melody is present — far more than the brief taps it is designed for. Take breaks
@@ -120,6 +137,8 @@ guaranteed. Use at your own risk; keep speaker volume moderate and stop if the
 sensation is uncomfortable.
 
 ## Known limitations
+
+- Built-in headphones count as “not the speakers”; use `--any-output` to allow them.
 
 - A tempo change to roughly half or double the previous tempo (for example,
   152 → 74 bpm) can stay at the old metrical level until a pause, with thumps at

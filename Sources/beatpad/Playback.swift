@@ -5,6 +5,10 @@ import Darwin
 import IOKit
 import CoreAudio
 
+func hapticsPauseMessage(_ policy: HapticsDecision) -> String? {
+    policy.allowed ? nil : "Haptics paused — \(policy.reason ?? "output unavailable")"
+}
+
 func timestamp(_ seconds: Double) -> String {
     let value = Int(max(0, seconds))
     return String(format: "%d:%02d", value / 60, value % 60)
@@ -15,8 +19,7 @@ func printHits(_ hits: [Hit], startSec: Double) {
     print("Totals: kicks \(selected.filter { $0.kind == .kick }.count), accents \(selected.filter { $0.kind == .accent }.count), hits \(selected.count)")
 }
 func playback(file: AVAudioFile?, buffer: AVAudioPCMBuffer?, duration: Double, name: String, hits: [Hit], options: Options, bpm: Double? = nil, dynamicsGains: [Double]? = nil) {
-    let volume = OutputVolume(following: options.followVolume)
-    if options.followVolume { volume.poll(force: true) }
+    let volume = OutputVolume(following: options.followVolume, anyOutput: options.anyOutput, externalTrackpad: options.external)
     let engine = AVAudioEngine(), player = AVAudioPlayerNode()
     engine.attach(player)
     let format = file?.processingFormat ?? buffer!.format
@@ -54,6 +57,12 @@ func playback(file: AVAudioFile?, buffer: AVAudioPCMBuffer?, duration: Double, n
     do { try engine.start() } catch { fail("Couldn't start audio output: \(error.localizedDescription)") }
     motor = openMotor()
     motorPointer = Unmanaged.passUnretained(motor! as AnyObject).toOpaque()
+    motorPolicy = volume.snapshot
+    volume.start(externalTrackpad: !motorBuiltIn)
+    defer { volume.stop() }
+    let initialPolicy = volume.haptics
+    var wasAllowed = initialPolicy.allowed
+    if let message = hapticsPauseMessage(initialPolicy) { print(message) }
     defer {
         player.stop(); engine.stop()
         if let motor { _ = actuatorClose?(motor) }
@@ -82,16 +91,20 @@ func playback(file: AVAudioFile?, buffer: AVAudioPCMBuffer?, duration: Double, n
             if Double(mach_absolute_time()) - Double(hitHost) > 0.020 * ticksPerSecond { continue }
             let cutoff = i + 1 < starts.count ? hostTime(starts[i + 1], plus: -voiceGap) : UInt64.max
             let master = options.level * selectedGains[i] * volume.gain
-            guard shouldActuate(effectiveLevel(master: master, dynamics: 1, volume: 1, shaping: hitShaping(selected[i]))) else { continue }
+            guard volume.haptics.allowed, shouldActuate(effectiveLevel(master: master, dynamics: 1, volume: 1, shaping: hitShaping(selected[i]))) else { continue }
             state.fired(selected[i])
-            voice(selected[i], master: master, cutoff: cutoff)
+            voice(selected[i], master: master, cutoff: cutoff) { volume.haptics.allowed }
         }
     }
     thread.qualityOfService = .userInteractive
     thread.start()
     let endHost = hostTime(startHost, plus: duration - options.start + latency + 0.3)
     while !stopRequested && mach_absolute_time() < endHost {
-        if options.followVolume { volume.poll() }
+        let policy = volume.haptics
+        if policy.allowed != wasAllowed {
+            print("\nHaptics \(policy.allowed ? "resumed" : "paused — " + (policy.reason ?? "output unavailable"))")
+            wasAllowed = policy.allowed
+        }
         let elapsed = max(0, (Double(mach_absolute_time()) - Double(startHost)) / ticksPerSecond - latency)
         let live = state.snapshot()
         print("\r▶ \(timestamp(min(duration, options.start + elapsed))) / \(timestamp(duration))   kicks \(live.kicks)  accents \(live.accents)   \(live.flash)   ", terminator: "")

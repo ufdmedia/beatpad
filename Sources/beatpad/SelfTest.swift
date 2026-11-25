@@ -324,7 +324,8 @@ func selftest() -> Int32 {
     let checksJ = schedulerSelftest()
     let checksK = staleAudioSelftest()
     let checksL = audioAppGroupingSelftest()
-    return (checks + checksB + checksC + checksD + checksE + checksF + checksG + checksH + checksI + checksJ + checksK + checksL).allSatisfy { $0 } ? 0 : 1
+    let checksM = outputPolicySelftest()
+    return (checks + checksB + checksC + checksD + checksE + checksF + checksG + checksH + checksI + checksJ + checksK + checksL + checksM).allSatisfy { $0 } ? 0 : 1
 }
 // Mature memory, no silence, and a deliberately non-aligned first beat.
 func spliceSelftest() -> [Bool] {
@@ -663,4 +664,267 @@ func audioAppGroupingSelftest() -> [Bool] {
     let checks = cases.map { audioAppIndex(bundle: $0.bundle, pid: $0.pid, apps: apps) == $0.expected }
     print("\(checks.allSatisfy { $0 } ? "PASS" : "FAIL") app grouping keeps Player/Player.Pro distinct; exact bundle/PID before longest dotted prefix")
     return checks
+}
+
+func outputPolicySelftest() -> [Bool] {
+    print("Scenario M (output/lid policy and scheduler; no hardware)")
+    let builtIn = kAudioDeviceTransportTypeBuiltIn
+    let speakers: UInt32 = 0x6973706b, headphones: UInt32 = 0x6864706e
+    let outputs: [(String, UInt32?, UInt32?, String, Bool)] = [
+        ("built-in speakers", builtIn, speakers, "Internal audio", true),
+        ("built-in headphones", builtIn, headphones, "Speakers / Headphones", false),
+        ("USB", kAudioDeviceTransportTypeUSB, nil, "USB Speakers", false),
+        ("HDMI", kAudioDeviceTransportTypeHDMI, nil, "Monitor", false),
+        ("DisplayPort", kAudioDeviceTransportTypeDisplayPort, nil, "Monitor", false),
+        ("Bluetooth", kAudioDeviceTransportTypeBluetooth, nil, "Wireless", false),
+        ("virtual", kAudioDeviceTransportTypeVirtual, nil, "Virtual Speakers", false),
+        ("aggregate", kAudioDeviceTransportTypeAggregate, nil, "Aggregate", false),
+        ("speaker name fallback", builtIn, nil, "MacBook Air Speakers", true),
+        ("MacBook Pro speaker fallback", builtIn, nil, "MacBook Pro Speakers", true),
+        ("internal speaker fallback", builtIn, nil, "Internal Speakers", true),
+        ("plain speaker fallback", builtIn, nil, "Speakers", true),
+        ("trimmed speaker fallback", builtIn, nil, " \tSpeakers\n", true),
+        ("case-insensitive fallback", builtIn, nil, "Internal sPeAkErS", true),
+        ("headphone name fallback", builtIn, nil, "External Headphones", false),
+        ("combined headphone/speaker fallback", builtIn, nil, "Headphones / Speakers", false),
+        ("combined headset/speaker fallback", builtIn, nil, "Headset & Speakers", false),
+        ("USB speaker name fallback", builtIn, nil, "USB Speakers", false),
+        ("numbered speaker fallback", builtIn, nil, "Speakers 2", false),
+        ("line speaker fallback", builtIn, nil, "Line Speakers", false),
+        ("output speaker fallback", builtIn, nil, "Output Speakers", false),
+        ("combined plus fallback", builtIn, nil, "Internal + Speakers", false),
+        ("built-in speaker fallback", builtIn, nil, "Built-in Speakers", true),
+        ("unknown output", nil, nil, "unknown output", false),
+        ("unknown data source", builtIn, 0, "Speakers", false)
+    ]
+    var checks: [Bool] = []
+    for (label, transport, source, name, expected) in outputs {
+        var ok = true
+        for lid in [false, true] {
+            for any in [false, true] {
+                for external in [false, true] {
+                    let result = hapticsAllowed(outputTransport: transport, outputDataSource: source.map { .value($0) } ?? .absent, outputName: name,
+                                                lid: lid ? .closed : .open, anyOutput: any, externalTrackpad: external)
+                    let allowed = external || (!lid && transport != nil && (any || expected))
+                    let reason = allowed ? nil : (lid ? "lid closed" : transport == nil ? "couldn't read the output route" :
+                        "sound is going to \"\(name)\"; the trackpad only runs on the built-in speakers (use --any-output to allow)")
+                    ok = ok && result.allowed == allowed && result.reason == reason
+                }
+            }
+        }
+        checks.append(ok)
+        print("\(ok ? "PASS" : "FAIL") \(label): default, any output, lid and external combinations")
+    }
+    let desktopMotorBuiltIn = false, desktopExternalFlag = false
+    let extra: [(String, UInt32?, PropertyRead<UInt32>, String, LidState, Bool, Bool, Bool, String?)] = [
+        ("unknown lid on built-in", builtIn, .value(speakers), "Speakers", .unknown, false, false, false, "lid state unavailable"),
+        ("unknown lid on external", builtIn, .value(speakers), "Speakers", .unknown, false, true, true, nil),
+        ("data source read failed", builtIn, .failed, "MacBook Pro Speakers", .open, false, false, false, "couldn't read the output route"),
+        ("absent source with speaker suffix", builtIn, .absent, "MacBook Air Speakers", .open, false, false, true, nil),
+        ("absent source with headphone suffix", builtIn, .absent, "Speakers / Headphones", .open, false, false, false, nil),
+        ("unreadable transport", nil, .value(speakers), "Speakers", .open, false, false, false, "couldn't read the output route"),
+        ("unreadable device with any output", nil, .failed, "unknown output", .open, true, false, false, "couldn't read the output route"),
+        ("unreadable source with any output", builtIn, .failed, "Speakers", .open, true, false, false, "couldn't read the output route"),
+        ("desktop external actuator without flag", kAudioDeviceTransportTypeUSB, .absent, "USB", .unknown, desktopExternalFlag, !desktopMotorBuiltIn, true, nil)
+    ]
+    for (label, transport, source, name, lid, any, external, allowed, reason) in extra {
+        let result = hapticsAllowed(outputTransport: transport, outputDataSource: source, outputName: name,
+                                    lid: lid, anyOutput: any, externalTrackpad: external)
+        let ok = result.allowed == allowed && (reason == nil || result.reason == reason)
+        checks.append(ok); print("\(ok ? "PASS" : "FAIL") \(label)")
+    }
+    var time = 10.0
+    let snapshot = PolicySnapshot(clock: { time })
+    func publish(_ allowed: Bool) {
+        snapshot.publish((allowed, allowed ? nil : "test pause"), startedAt: time, version: snapshot.version)
+    }
+    func check(_ ok: Bool, _ label: String) {
+        checks.append(ok); print("\(ok ? "PASS" : "FAIL") \(label)")
+    }
+    publish(true)
+    time += 1
+    check(snapshot.current.allowed, "snapshot exactly one second old remains fresh")
+    time += 0.001
+    check(!snapshot.current.allowed && snapshot.current.reason == "output check stalled", "snapshot older than one second denies")
+    publish(true)
+    let oldVersion = snapshot.version
+    snapshot.invalidate()
+    check(!snapshot.current.allowed, "change notification denies before re-evaluation")
+    snapshot.publish((true, nil), startedAt: time, version: oldVersion)
+    check(!snapshot.current.allowed, "in-flight evaluation cannot overwrite notification")
+    publish(true)
+    check(snapshot.current.allowed, "fresh evaluation resumes after notification")
+    var actuations = 0
+    let hook = { actuations += 1 }
+    publish(false)
+    for _ in 0..<10 { play([(220, 1)], ms: 40, level: 1, policy: snapshot, actuationHook: hook) }
+    check(actuations == 0, "play gate emits zero actuations while denied")
+    publish(true)
+    play([(220, 1)], ms: 40, level: 1, policy: snapshot, actuationHook: hook)
+    check(actuations == 1, "play gate invokes fake actuator when allowed")
+    time += 1.001
+    play([(220, 1)], ms: 40, level: 1, policy: snapshot, actuationHook: hook)
+    publish(true); snapshot.invalidate()
+    play([(220, 1)], ms: 40, level: 1, policy: snapshot, actuationHook: hook)
+    check(actuations == 1, "play gate rejects stale and invalidated snapshots")
+    publish(false)
+    let initialPolicy = snapshot.current
+    publish(true)
+    check(hapticsPauseMessage(initialPolicy) == "Haptics paused — test pause" && hapticsPauseMessage(snapshot.current) == nil,
+          "startup notice uses one snapshot across policy recovery")
+    check(hapticsPauseMessage((false, nil)) == "Haptics paused — output unavailable", "startup notice handles missing reason")
+
+    // Hold a submission in its closure while a second thread tries to invalidate.
+    let atomic = PolicySnapshot(clock: { 0 })
+    atomic.publish((true, nil), startedAt: 0, version: atomic.version)
+    let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+    let invalidating = DispatchSemaphore(value: 0), invalidated = DispatchSemaphore(value: 0)
+    let submitted = DispatchSemaphore(value: 0)
+    DispatchQueue.global().async {
+        atomic.submit { entered.signal(); release.wait() }
+        submitted.signal()
+    }
+    entered.wait()
+    DispatchQueue.global().async { invalidating.signal(); atomic.invalidate(); invalidated.signal() }
+    invalidating.wait()
+    let blocked = invalidated.wait(timeout: .now() + .milliseconds(30)) == .timedOut
+    release.signal(); submitted.wait()
+    if blocked { invalidated.wait() }
+    var afterInvalidation = 0
+    atomic.submit { afterInvalidation += 1 }
+    check(blocked && afterInvalidation == 0, "invalidation serializes with submit and completed invalidation rejects later submission")
+
+    var monitorTime = 0.0, lidReads = 0
+    var route = OutputObservation(device: 42, transport: builtIn, dataSource: .value(speakers), name: "Internal Speakers")
+    var attempts: [String: Int] = [:]
+    var callbacks: [AudioObjectID: AudioObjectPropertyListenerBlock] = [:]
+    var removalAttempts: [AudioObjectID: Int] = [:]
+    let stoppedCleanup = DispatchSemaphore(value: 0)
+    let monitor = OutputVolume(following: false, clock: { monitorTime }, lidReader: { lidReads += 1; return .open },
+        routeReader: { route }, automatic: false,
+        install: { object, address, _, block in
+            let key = "\(object):\(address.mSelector)"
+            attempts[key, default: 0] += 1
+            callbacks[object] = block
+            return attempts[key] == 1 ? kAudioHardwareUnspecifiedError : noErr
+        }, uninstall: { object, _, _, _ in
+            removalAttempts[object, default: 0] += 1
+            if object == AudioObjectID(kAudioObjectSystemObject) && removalAttempts[object] == 2 { stoppedCleanup.signal() }
+            return removalAttempts[object] == 1 ? kAudioHardwareUnspecifiedError : noErr
+        })
+    monitor.start(externalTrackpad: false)
+    check(!monitor.haptics.allowed, "failed system and device listener registrations deny")
+    monitorTime = 0.25; monitor.refresh()
+    check(monitor.haptics.allowed && attempts.values.allSatisfy { $0 == 2 }, "next tick retries all missing listeners and recovers on unchanged device")
+    for tick in [0.5, 0.75] { monitorTime = tick; monitor.refresh() }
+    monitorTime = 1.001
+    check(lidReads == 4 && monitor.haptics.allowed, "each evaluation renews the lid observation")
+    monitor.refresh()
+    check(monitor.haptics.allowed && lidReads == 5, "next evaluation reads the lid again")
+    var systemAddress = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    let beforeSystemNotification = monitor.snapshot.version
+    callbacks[AudioObjectID(kAudioObjectSystemObject)]?(1, &systemAddress)
+    check(monitor.snapshot.version > beforeSystemNotification, "system listener always invalidates the current route")
+    monitor.refresh()
+    route.device = 43
+    monitor.refresh(); monitor.refresh()
+    let oldVersionAfterSwitch = monitor.snapshot.version
+    var callbackAddress = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDataSource, mScope: kAudioDevicePropertyScopeOutput, mElement: kAudioObjectPropertyElementMain)
+    callbacks[42]?(1, &callbackAddress)
+    check(monitor.snapshot.version == oldVersionAfterSwitch, "obsolete device callbacks cannot invalidate current policy")
+    check((removalAttempts[42] ?? 0) >= 2, "failed device listener removals are retained and retried")
+    monitor.stop()
+    check(!monitor.haptics.allowed, "monitor stop revokes permission")
+    check(stoppedCleanup.wait(timeout: .now() + 2) == .success, "failed shutdown listener removal is retried after stop")
+
+    for anyOutput in [false, true] {
+        var steadyTime = 0.0, steadyLidReads = 0
+        let steadyMonitor = OutputVolume(following: false, anyOutput: anyOutput, clock: { steadyTime },
+            lidReader: { steadyLidReads += 1; return .open },
+            routeReader: { OutputObservation(device: 42, transport: builtIn, dataSource: .value(speakers), name: "Internal Speakers") },
+            automatic: false, install: { _, _, _, _ in noErr }, uninstall: { _, _, _, _ in noErr })
+        steadyMonitor.start(externalTrackpad: false)
+        // Evaluate on a 250 ms cadence with deterministic 0–20 ms timer jitter.
+        // Sample between evaluations as well as on ticks to catch transient stalls.
+        let jitter = [0.0, 0.005, 0.015, 0.01, 0.02]
+        var tick = 1, evaluations = 1, lastEvaluation = 0.0
+        var alwaysAllowed = true, neverStalled = true
+        for sample in 0...1000 {
+            let sampleTime = Double(sample) / 100
+            while Double(tick) * 0.25 + jitter[tick % jitter.count] <= sampleTime {
+                steadyTime = Double(tick) * 0.25 + jitter[tick % jitter.count]
+                steadyMonitor.refresh()
+                lastEvaluation = steadyTime
+                evaluations += 1; tick += 1
+            }
+            steadyTime = sampleTime
+            let policy = steadyMonitor.snapshot.current
+            alwaysAllowed = alwaysAllowed && policy.allowed
+            neverStalled = neverStalled && policy.reason != "output check stalled"
+        }
+        let label = anyOutput ? "any output" : "built-in speakers"
+        check(alwaysAllowed && neverStalled && steadyLidReads == evaluations,
+              "\(label): 10 s of jittered evaluations stays allowed at every 10 ms sample")
+        var stalledAt: Double?
+        for sample in 1...110 {
+            steadyTime = 10 + Double(sample) / 100
+            let policy = steadyMonitor.snapshot.current
+            if !policy.allowed && policy.reason == "output check stalled" {
+                stalledAt = steadyTime
+                break
+            }
+        }
+        check(stalledAt.map { $0 - lastEvaluation <= 1.1 } ?? false,
+              "\(label): halted evaluations report stalled within 1.1 s")
+        steadyMonitor.stop()
+    }
+
+    let externalMonitor = OutputVolume(following: false, clock: { monitorTime }, lidReader: { .unknown },
+        routeReader: { OutputObservation(device: 0, transport: nil, dataSource: .failed, name: "unknown output") }, automatic: false,
+        install: { _, _, _, _ in kAudioHardwareUnspecifiedError }, uninstall: { _, _, _, _ in noErr })
+    externalMonitor.start(externalTrackpad: true)
+    externalMonitor.snapshot.invalidate()
+    monitorTime += 100
+    check(externalMonitor.haptics.allowed, "external actuator ignores notifications, stale observations and listener failures")
+    var externalActuations = 0
+    play([(220, 1)], ms: 40, level: 1, policy: externalMonitor.snapshot, actuationHook: { externalActuations += 1 })
+    externalMonitor.stop()
+    play([(220, 1)], ms: 40, level: 1, policy: externalMonitor.snapshot, actuationHook: { externalActuations += 1 })
+    check(!externalMonitor.haptics.allowed && externalActuations == 1, "external actuator stop revokes fixed permission at submit gate")
+    let rate = 48000.0
+    let audio = testTrack(beatScenario: true, sr: rate, duration: 20).samples
+    let tracker: LiveTracker
+    do { tracker = try LiveTracker(sampleRate: rate, sensitivity: 0.5, forcedBpm: 120) }
+    catch { fail(String(describing: error)) }
+    var scheduler = LiveHapticScheduler(), melodyOnly = LiveHapticScheduler(melodyOnly: true)
+    var deniedThumps = 0, deniedNotes = 0, resumedThumps = 0, resumedNotes = 0, trackedWhilePaused = 0
+    audio.withUnsafeBufferPointer { data in
+        for start in stride(from: 0, to: data.count, by: 512) {
+            let end = min(start + 512, data.count), time = Double(end) / rate
+            tracker.ingest(UnsafeBufferPointer(rebasing: data[start..<end]), firstSampleTime: Double(start) / rate)
+            let allowed = hapticsAllowed(outputTransport: kAudioDeviceTransportTypeUSB, outputDataSource: .absent,
+                                         outputName: "USB", lid: .open, anyOutput: time >= 15,
+                                         externalTrackpad: false).allowed
+            let beat = tracker.plan(after: time - LiveHapticScheduler.late)
+            if !allowed && beat != nil { trackedWhilePaused += 1 }
+            let note: MelodyFrame = (time, 220, 0.5)
+            switch scheduler.nextAction(now: time, nextBeat: beat, melody: note, allowed: allowed) {
+            case .fireThump:
+                if allowed { resumedThumps += 1 } else { deniedThumps += 1 }
+            case .playMelody:
+                if allowed { resumedNotes += 1 } else { deniedNotes += 1 }
+            case .wait: break
+            }
+            if case .playMelody = melodyOnly.nextAction(now: time, nextBeat: beat, melody: note, allowed: allowed) {
+                if allowed { resumedNotes += 1 } else { deniedNotes += 1 }
+            }
+        }
+    }
+    let schedulerChecks = [deniedThumps == 0 && deniedNotes == 0, trackedWhilePaused > 0,
+                           resumedThumps > 0 && resumedNotes > 0]
+    for (ok, label) in zip(schedulerChecks, ["disallowed scheduler emits zero thumps and melody (including melody-only)",
+                                           "tracking keeps planning beats while paused", "thumps and melody resume when output becomes allowed"]) {
+        print("\(ok ? "PASS" : "FAIL") \(label)")
+    }
+    return checks + schedulerChecks
 }

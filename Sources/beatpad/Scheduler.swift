@@ -22,7 +22,12 @@ struct LiveHapticScheduler {
     // The executor reports the actual end because voice() can stop at its cutoff
     // or skip a muted thump; neither should leave a nominal-duration dead zone.
     mutating func thumpFinished(at time: Double) { busyUntil = time }
-    mutating func nextAction(now: Double, nextBeat: PlannedBeat?, melody: MelodyFrame) -> HapticAction {
+    mutating func nextAction(now: Double, nextBeat: PlannedBeat?, melody: MelodyFrame, allowed: Bool = true) -> HapticAction {
+        if !allowed {
+            if let beat = nextBeat, beat.time - now <= Self.commit { lastBeat = max(lastBeat, beat.time) }
+            busyUntil = now
+            return .wait(until: now + Self.poll)
+        }
         if now < busyUntil { return .wait(until: busyUntil) }
         let beat = nextBeat.flatMap { $0.time > lastBeat ? $0 : nil }
         if let beat, !melodyOnly, beat.time - now <= Self.commit {

@@ -39,6 +39,7 @@ struct Options {
     var start = 0.0
     var bpm: Double?
     var mode = AnalysisMode.beat
+    var anyOutput = false
     var external = false
     var writeTestTrack: String?
 }
@@ -78,6 +79,7 @@ Options:
   --kick-only        thumps only: drop beat ticks or onset accents
   --start SEC        start SEC seconds into the file (default 0)
   --bpm N            force file/live beat tempo, or metronome tempo (default 120); >0
+  --any-output       allow built-in trackpad with any audio output (lid must be open)
   --external         use an external Magic Trackpad
 
 Development:
@@ -150,6 +152,7 @@ func parseOptions() -> Options {
                 if result.seconds! <= 0 { usageError("--seconds must be greater than 0") }
             case "--dry-run": result.dryRun = true
             case "--kick-only": result.kickOnly = true
+            case "--any-output": result.anyOutput = true
             case "--external": result.external = true
             case "--offset-ms": result.offsetMs = number()
             case "--level":
@@ -189,6 +192,9 @@ func parseOptions() -> Options {
     }
     if seen.contains("--jitter-us") && result.simulateFile == nil { usageError("--jitter-us requires --simulate-live") }
     if result.spliceAt != nil && result.simulateFile == nil { usageError("--splice-at requires --simulate-live") }
+    if result.anyOutput && !result.live && result.file == nil && !result.metronome && !result.help {
+        usageError("--any-output requires --live, an audio file, or --metronome")
+    }
     if result.allApps && !result.listApps { usageError("--all requires --list-apps") }
     let modes = [result.simulateFile != nil, result.file != nil, result.metronome, result.listen, result.live, result.selftest, result.writeTestTrack != nil, result.listApps, result.inputList].filter { $0 }.count
     if modes > 1 { usageError("Choose one audio file, --metronome, --listen, --live, --selftest, --simulate-live, --write-test-track, --list-apps, or --input-list") }

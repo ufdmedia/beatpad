@@ -63,14 +63,14 @@ final class LiveRuntime: @unchecked Sendable {
                 let fresh = audioFresh && audioNow - detected.time <= 0.100
                 let melody: MelodyFrame = (detected.time, fresh ? detected.hz.map { $0 * pow(2, Double(self.options.melodyOctave)) } : nil,
                     self.options.level * self.options.melodyLevel * detected.strength * dynamicsGain * self.volume.gain)
-                switch scheduler.nextAction(now: now, nextBeat: beat, melody: melody) {
+                switch scheduler.nextAction(now: now, nextBeat: beat, melody: melody, allowed: self.volume.haptics.allowed) {
                 case .wait(let until):
                     waitUntil(hostTime(0, plus: until), spinMargin: 0)
                 case .playMelody(let hz, let duration, let level):
                     self.lock.lock()
                     let stillFresh = self.audioIsFresh(at: Double(mach_absolute_time()) / ticksPerSecond)
                     self.lock.unlock()
-                    guard stillFresh, !stopRequested else {
+                    guard stillFresh, self.volume.haptics.allowed, !stopRequested else {
                         scheduler.thumpFinished(at: Double(mach_absolute_time()) / ticksPerSecond)
                         continue
                     }
@@ -93,7 +93,7 @@ final class LiveRuntime: @unchecked Sendable {
                     let hit = Hit(time: beat.time - self.mapping, kind: beat.kind!, strength: beat.strength)
                     let master = self.options.level * dynamicsGain * self.volume.gain
                     let intensity = effectiveLevel(master: master, dynamics: 1, volume: 1, shaping: hitShaping(hit))
-                    guard shouldActuate(intensity) else {
+                    guard self.volume.haptics.allowed, shouldActuate(intensity) else {
                         scheduler.thumpFinished(at: Double(mach_absolute_time()) / ticksPerSecond)
                         continue
                     }
@@ -101,7 +101,7 @@ final class LiveRuntime: @unchecked Sendable {
                     state.fired(hit)
                     voice(hit, master: master, cutoff: hostTime(0, plus: cutoff)) {
                         self.lock.lock(); defer { self.lock.unlock() }
-                        return self.audioIsFresh(at: Double(mach_absolute_time()) / ticksPerSecond)
+                        return self.volume.haptics.allowed && self.audioIsFresh(at: Double(mach_absolute_time()) / ticksPerSecond)
                     }
                     scheduler.thumpFinished(at: Double(mach_absolute_time()) / ticksPerSecond)
                 }
@@ -125,8 +125,7 @@ final class LiveRuntime: @unchecked Sendable {
 
 @available(macOS 14.2, *)
 func listen(options: Options) {
-    let volume = OutputVolume(following: options.followVolume)
-    volume.poll(force: true)
+    let volume = OutputVolume(following: options.followVolume, anyOutput: options.anyOutput, externalTrackpad: options.external)
     var tap: AudioObjectID = 0, aggregate: AudioObjectID = 0, captureDevice: AudioObjectID = 0
     var proc: AudioDeviceIOProcID?
     var started = false
@@ -166,7 +165,11 @@ func listen(options: Options) {
     if options.live {
         preferExternal = options.external
         motor = openMotor(); motorPointer = Unmanaged.passUnretained(motor!).toOpaque()
+        motorPolicy = volume.snapshot
     }
+    volume.start(externalTrackpad: options.live ? !motorBuiltIn : options.external)
+    defer { volume.stop() }
+    if options.live, let reason = volume.haptics.reason { print("Haptics paused — \(reason)") }
     do {
         if let input = options.input {
             let device = try selectInput(input)
@@ -278,7 +281,6 @@ func listen(options: Options) {
         let start = now()
         var lastNonzero = start, microphoneWarned = false
         while !stopRequested && (options.seconds == nil || now() - start < options.seconds!) {
-            volume.poll()
             if isInput {
                 let stats = accumulator.snapshot(resetWindow: runtime != nil)
                 if stats.windowPeak > 0 { lastNonzero = now() }
@@ -288,8 +290,10 @@ func listen(options: Options) {
             }
             if let runtime {
                 let (trackingStatus, db, intensity) = runtime.display(), hits = state.snapshot()
-                let audioLabel = label
-                let status = runtime.input.callbackAge > liveNoCallbackSeconds ? "waiting for \(audioLabel) audio…" : trackingStatus
+                let waitingStatus = options.app == nil && options.input == nil ? "waiting for system audio…" : "waiting for \(label) audio…"
+                let policy = volume.haptics
+                let status = !policy.allowed ? "paused — \(policy.reason ?? "output unavailable")" :
+                    (runtime.input.callbackAge > liveNoCallbackSeconds ? waitingStatus : trackingStatus)
                 print("\r◉ \(label) · \(status) · \(hits.flash) · thumps \(hits.kicks) ticks \(hits.accents) · level \(levelBar(db, cells: 8)) · int \(String(repeating: "▇", count: Int((intensity * 5).rounded())))\(String(repeating: "▁", count: 5 - Int((intensity * 5).rounded()))) \(Int((intensity * 100).rounded()))% · \(timestamp(now() - start))   ", terminator: "")
                 fflush(stdout); usleep(50_000); continue
             }
@@ -320,14 +324,16 @@ func listen(options: Options) {
     for source in signals { source.cancel() }
     if options.live {
         live?.summary()
-        if let problem { fail(problem, headline: "beatpad couldn't capture audio.") }
+        if let problem { volume.stop(); fail(problem, headline: "beatpad couldn't capture audio.") }
         return
     }
+    volume.refresh()
     print(volume.summary)
+    print(volume.hapticsSummary)
     let stats = meter?.snapshot() ?? CaptureTotals()
     if stats.callbacks == 0 {
         print("Heard nothing — \(label) is paused or not playing yet.")
-        if let problem { fail(problem, headline: "beatpad couldn't capture audio.") }
+        if let problem { volume.stop(); fail(problem, headline: "beatpad couldn't capture audio.") }
         return
     }
     let bufferMS = format.mSampleRate > 0 ? Double(stats.lastFrames) / format.mSampleRate * 1000 : 0
@@ -344,6 +350,6 @@ func listen(options: Options) {
         if !isInput { print("Heard only silence. Start audio and allow this terminal app in System Settings → Privacy & Security → Screen & System Audio Recording → System Audio Recording Only, then quit and reopen it.") }
     }
     fflush(stdout)
-    if let problem { fail(problem, headline: "beatpad couldn't capture audio.") }
+    if let problem { volume.stop(); fail(problem, headline: "beatpad couldn't capture audio.") }
 }
 
