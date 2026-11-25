@@ -1,0 +1,15 @@
+{
+  "tune": ["/path/to/song.wav"],
+  "holdout": ["/path/to/another-song.wav"],
+  "splice": [
+    {
+      "name": "transition",
+      "first": "/path/to/song.wav",
+      "first_start": 0,
+      "first_length": 40,
+      "second": "/path/to/another-song.wav",
+      "second_start": 30
+    }
+  ],
+  "splice_length": 60
+}

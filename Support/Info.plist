@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.ufdmedia.beatpad</string>
+    <key>CFBundleName</key>
+    <string>beatpad</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>beatpad listens to the audio you're playing to find the beat for the trackpad. Nothing is recorded or saved.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>beatpad listens to the music around you to find the beat for the trackpad. Nothing is recorded or saved.</string>
+</dict>
+</plist>
